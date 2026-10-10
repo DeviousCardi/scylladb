@@ -8,6 +8,7 @@
 
 
 #include <boost/test/unit_test.hpp>
+#include <boost/program_options.hpp>
 #include <stdlib.h>
 #include <iostream>
 #include <fmt/ranges.h>
@@ -19,6 +20,7 @@
 #include <yaml-cpp/yaml.h>
 #include "db/config.hh"
 #include "db/object_storage_endpoint_param.hh"
+#include "utils/config_file_impl.hh"
 #include "utils/updateable_value.hh"
 
 using namespace db;
@@ -1031,4 +1033,37 @@ SEASTAR_THREAD_TEST_CASE(test_parse_object_storage_endpoints_one_entry_broken) {
     BOOST_REQUIRE_EQUAL(endpoints.size(), 1);
     BOOST_CHECK(endpoints.front().is_gs_storage());
     BOOST_CHECK_EQUAL(endpoints.front().key(), "https://storage.googleapis.com");
+}
+
+// Reproducer for https://github.com/scylladb/scylladb/issues/24375: a colon
+// inside a nested {...} value, like the port of a KMS endpoint URL, must not
+// be taken as the separator between two top-level key=value pairs.
+SEASTAR_THREAD_TEST_CASE(test_parse_command_line_nested_map_with_colon_in_value) {
+    namespace bpo = boost::program_options;
+    using string_string_map = std::unordered_map<sstring, std::unordered_map<sstring, sstring>>;
+
+    auto parse = [] (const char* value) {
+        bpo::options_description desc;
+        desc.add_options()("kms-hosts", bpo::value<string_string_map>());
+        const char* argv[] = { "scylla", "--kms-hosts", value };
+        bpo::variables_map vm;
+        bpo::store(bpo::parse_command_line(std::size(argv), argv, desc), vm);
+        return vm["kms-hosts"].as<string_string_map>();
+    };
+
+    auto hosts = parse("host1={endpoint=https://kms.eu-central-1.amazonaws.com:443,master_key=foo}:host2={master_key=bar}");
+    BOOST_REQUIRE_EQUAL(hosts.size(), 2);
+    BOOST_REQUIRE_EQUAL(hosts.at("host1").size(), 2);
+    BOOST_CHECK_EQUAL(hosts.at("host1").at("endpoint"), "https://kms.eu-central-1.amazonaws.com:443");
+    BOOST_CHECK_EQUAL(hosts.at("host1").at("master_key"), "foo");
+    BOOST_REQUIRE_EQUAL(hosts.at("host2").size(), 1);
+    BOOST_CHECK_EQUAL(hosts.at("host2").at("master_key"), "bar");
+
+    // The endpoint as the last pair of a nested value was already parsed
+    // correctly and must stay that way.
+    hosts = parse("host1={master_key=foo,endpoint=https://kms.eu-central-1.amazonaws.com:443}:host2={master_key=bar}");
+    BOOST_REQUIRE_EQUAL(hosts.size(), 2);
+    BOOST_CHECK_EQUAL(hosts.at("host1").at("endpoint"), "https://kms.eu-central-1.amazonaws.com:443");
+    BOOST_CHECK_EQUAL(hosts.at("host1").at("master_key"), "foo");
+    BOOST_CHECK_EQUAL(hosts.at("host2").at("master_key"), "bar");
 }

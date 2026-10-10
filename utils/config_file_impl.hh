@@ -125,6 +125,35 @@ void validate(boost::any& out, const std::vector<std::string>& in, std::unordere
     for (const auto& s : in) {
         boost::sregex_iterator i(s.begin(), s.end(), key), e;
 
+        // A ':' only separates two key=value pairs when it is not nested in
+        // a {...} or [...] value. Otherwise a colon inside a nested value,
+        // like the port in "h={endpoint=https://host:443,k=v}", is taken as
+        // the start of a new top-level key (#24375).
+        size_t scanned = 0;
+        int level = 0;
+        auto skip_nested = [&] {
+            for (; i != e; ++i) {
+                for (auto pos = size_t(i->position()); scanned < pos; ++scanned) {
+                    switch (s[scanned]) {
+                    case '{': case '[':
+                        ++level;
+                        break;
+                    case '}': case ']':
+                        if (level > 0) {
+                            --level;
+                        }
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                if (level == 0) {
+                    break;
+                }
+            }
+        };
+
+        skip_nested();
         if (i == e) {
             throw boost::program_options::invalid_option_value(s);
         }
@@ -134,7 +163,9 @@ void validate(boost::any& out, const std::vector<std::string>& in, std::unordere
             auto vs = s.begin() + i->position() + i->length();
             auto ve = s.end();
 
-            if (++i != e) {
+            ++i;
+            skip_nested();
+            if (i != e) {
                 ve = s.begin() + i->position();
             }
 
